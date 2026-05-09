@@ -10,6 +10,7 @@ class Config:
     EPOCHS = 30
     LR = 5e-4
     BATCH_SIZE = 512
+    HIDDEN_DIM = 256
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
     # Loss Hyperparameters

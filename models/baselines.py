@@ -33,26 +33,27 @@ class _OutcomeHead(nn.Module):
     def __init__(self, in_dim: int, hidden_dim: int = 100, use_ziln: bool = False):
         super().__init__()
         self.use_ziln = use_ziln
+        h = hidden_dim // 2
 
         if use_ziln:
             # 3 sub-heads: π (logit), μ, σ (via Softplus)
             self.pi_head = nn.Sequential(
-                nn.Linear(in_dim, hidden_dim), nn.ELU(),
-                nn.Linear(hidden_dim, 1),
+                nn.Linear(in_dim, h), nn.ELU(),
+                nn.Linear(h, 1),
             )
             self.mu_head = nn.Sequential(
-                nn.Linear(in_dim, hidden_dim), nn.ELU(),
-                nn.Linear(hidden_dim, 1),
+                nn.Linear(in_dim, h), nn.ELU(),
+                nn.Linear(h, 1),
             )
             self.sigma_head = nn.Sequential(
-                nn.Linear(in_dim, hidden_dim), nn.ELU(),
-                nn.Linear(hidden_dim, 1), nn.Softplus(),
+                nn.Linear(in_dim, h), nn.ELU(),
+                nn.Linear(h, 1), nn.Softplus(),
             )
         else:
             self.head = nn.Sequential(
-                nn.Linear(in_dim, hidden_dim), nn.ELU(),
-                nn.Linear(hidden_dim, hidden_dim), nn.ELU(),
-                nn.Linear(hidden_dim, 1),
+                nn.Linear(in_dim, h), nn.ELU(),
+                nn.Linear(h, h), nn.ELU(),
+                nn.Linear(h, 1),
             )
 
     def forward(self, z):
@@ -106,8 +107,7 @@ class TARNet(nn.Module):
         self,
         cate_dims,
         num_count,
-        shared_hidden: int = 200,
-        outcome_hidden: int = 100,
+        hidden: int = 200,
         use_ziln: bool = False,
     ):
         super().__init__()
@@ -117,14 +117,14 @@ class TARNet(nn.Module):
         in_dim = self.embedding.output_dim
 
         self.shared = nn.Sequential(
-            nn.Linear(in_dim, shared_hidden), nn.ELU(),
-            nn.Linear(shared_hidden, shared_hidden), nn.ELU(),
-            nn.Linear(shared_hidden, shared_hidden), nn.ELU(),
+            nn.Linear(in_dim, hidden), nn.ELU(),
+            nn.Linear(hidden, hidden), nn.ELU(),
+            nn.Linear(hidden, hidden), nn.ELU(),
         )
-        self.shared_out_dim = shared_hidden
+        self.shared_out_dim = hidden
 
-        self.y0_head = _OutcomeHead(shared_hidden, outcome_hidden, use_ziln)
-        self.y1_head = _OutcomeHead(shared_hidden, outcome_hidden, use_ziln)
+        self.y0_head = _OutcomeHead(hidden, hidden, use_ziln)
+        self.y1_head = _OutcomeHead(hidden, hidden, use_ziln)
 
     def get_representation(self, x_cat, x_num):
         """Return shared representation (before outcome heads)."""
@@ -163,8 +163,7 @@ class DragonNet(nn.Module):
         self,
         cate_dims,
         num_count,
-        shared_hidden: int = 200,
-        outcome_hidden: int = 100,
+        hidden: int = 200,
         use_ziln: bool = False,
     ):
         super().__init__()
@@ -174,19 +173,19 @@ class DragonNet(nn.Module):
         in_dim = self.embedding.output_dim
 
         self.shared = nn.Sequential(
-            nn.Linear(in_dim, shared_hidden), nn.ELU(),
-            nn.Linear(shared_hidden, shared_hidden), nn.ELU(),
-            nn.Linear(shared_hidden, shared_hidden), nn.ELU(),
+            nn.Linear(in_dim, hidden), nn.ELU(),
+            nn.Linear(hidden, hidden), nn.ELU(),
+            nn.Linear(hidden, hidden), nn.ELU(),
         )
-        self.shared_out_dim = shared_hidden
+        self.shared_out_dim = hidden
 
-        self.y0_head = _OutcomeHead(shared_hidden, outcome_hidden, use_ziln)
-        self.y1_head = _OutcomeHead(shared_hidden, outcome_hidden, use_ziln)
+        self.y0_head = _OutcomeHead(hidden, hidden, use_ziln)
+        self.y1_head = _OutcomeHead(hidden, hidden, use_ziln)
 
         # Propensity head  P(T=1 | X)
         self.propensity_head = nn.Sequential(
-            nn.Linear(shared_hidden, outcome_hidden), nn.ELU(),
-            nn.Linear(outcome_hidden, 1),
+            nn.Linear(hidden, hidden // 2), nn.ELU(),
+            nn.Linear(hidden // 2, 1),
         )
 
     def get_representation(self, x_cat, x_num):
@@ -275,8 +274,7 @@ class CFR(nn.Module):
         self,
         cate_dims,
         num_count,
-        shared_hidden: int = 200,
-        outcome_hidden: int = 100,
+        hidden: int = 200,
         use_ziln: bool = False,
         mode: str = "wass",
         lambda_ipm: float = 1.0,
@@ -291,14 +289,14 @@ class CFR(nn.Module):
         in_dim = self.embedding.output_dim
 
         self.shared = nn.Sequential(
-            nn.Linear(in_dim, shared_hidden), nn.ELU(),
-            nn.Linear(shared_hidden, shared_hidden), nn.ELU(),
-            nn.Linear(shared_hidden, shared_hidden), nn.ELU(),
+            nn.Linear(in_dim, hidden), nn.ELU(),
+            nn.Linear(hidden, hidden), nn.ELU(),
+            nn.Linear(hidden, hidden), nn.ELU(),
         )
-        self.shared_out_dim = shared_hidden
+        self.shared_out_dim = hidden
 
-        self.y0_head = _OutcomeHead(shared_hidden, outcome_hidden, use_ziln)
-        self.y1_head = _OutcomeHead(shared_hidden, outcome_hidden, use_ziln)
+        self.y0_head = _OutcomeHead(hidden, hidden, use_ziln)
+        self.y1_head = _OutcomeHead(hidden, hidden, use_ziln)
 
     def get_representation(self, x_cat, x_num):
         emb = self.embedding(x_cat, x_num)
@@ -355,8 +353,7 @@ class UniTE(nn.Module):
         self,
         cate_dims,
         num_count,
-        shared_hidden: int = 200,
-        outcome_hidden: int = 100,
+        hidden: int = 200,
         use_ziln: bool = False,
     ):
         super().__init__()
@@ -366,16 +363,16 @@ class UniTE(nn.Module):
         in_dim = self.embedding.output_dim
 
         self.shared = nn.Sequential(
-            nn.Linear(in_dim, shared_hidden), nn.ELU(),
-            nn.Linear(shared_hidden, shared_hidden), nn.ELU(),
-            nn.Linear(shared_hidden, shared_hidden), nn.ELU(),
+            nn.Linear(in_dim, hidden), nn.ELU(),
+            nn.Linear(hidden, hidden), nn.ELU(),
+            nn.Linear(hidden, hidden), nn.ELU(),
         )
-        self.shared_out_dim = shared_hidden
+        self.shared_out_dim = hidden
 
         # Prognostic head μ(x)
-        self.mu_prog_head = _OutcomeHead(shared_hidden, outcome_hidden, use_ziln)
+        self.mu_prog_head = _OutcomeHead(hidden, hidden, use_ziln)
         # Treatment effect head τ(x)
-        self.tau_head = _OutcomeHead(shared_hidden, outcome_hidden, use_ziln)
+        self.tau_head = _OutcomeHead(hidden, hidden, use_ziln)
 
     def get_representation(self, x_cat, x_num):
         emb = self.embedding(x_cat, x_num)
@@ -424,8 +421,7 @@ class EUEN(nn.Module):
         self,
         cate_dims,
         num_count,
-        shared_hidden: int = 200,
-        outcome_hidden: int = 100,
+        hidden: int = 200,
         use_ziln: bool = False,
     ):
         super().__init__()
@@ -435,16 +431,16 @@ class EUEN(nn.Module):
         in_dim = self.embedding.output_dim
 
         self.shared = nn.Sequential(
-            nn.Linear(in_dim, shared_hidden), nn.ELU(),
-            nn.Linear(shared_hidden, shared_hidden), nn.ELU(),
-            nn.Linear(shared_hidden, shared_hidden), nn.ELU(),
+            nn.Linear(in_dim, hidden), nn.ELU(),
+            nn.Linear(hidden, hidden), nn.ELU(),
+            nn.Linear(hidden, hidden), nn.ELU(),
         )
-        self.shared_out_dim = shared_hidden
+        self.shared_out_dim = hidden
 
         # Control head = E[Y | T=0, X]
-        self.control_head = _OutcomeHead(shared_hidden, outcome_hidden, use_ziln)
+        self.control_head = _OutcomeHead(hidden, hidden, use_ziln)
         # Uplift head = τ(x)
-        self.uplift_head = _OutcomeHead(shared_hidden, outcome_hidden, use_ziln)
+        self.uplift_head = _OutcomeHead(hidden, hidden, use_ziln)
 
     def get_representation(self, x_cat, x_num):
         emb = self.embedding(x_cat, x_num)
@@ -476,7 +472,6 @@ class TLearner(nn.Module):
         cate_dims,
         num_count,
         hidden: int = 200,
-        outcome_hidden: int = 100,
         use_ziln: bool = False,
     ):
         super().__init__()
@@ -497,8 +492,8 @@ class TLearner(nn.Module):
             nn.Linear(hidden, hidden), nn.ELU(),
         )
 
-        self.y0_head = _OutcomeHead(hidden, outcome_hidden, use_ziln)
-        self.y1_head = _OutcomeHead(hidden, outcome_hidden, use_ziln)
+        self.y0_head = _OutcomeHead(hidden, hidden, use_ziln)
+        self.y1_head = _OutcomeHead(hidden, hidden, use_ziln)
 
     def forward(self, x_cat, x_num):
         e0 = self.emb_0(x_cat, x_num)
@@ -535,7 +530,6 @@ class SLearner(nn.Module):
         cate_dims,
         num_count,
         hidden: int = 200,
-        outcome_hidden: int = 100,
     ):
         super().__init__()
         self.use_ziln = False
@@ -547,9 +541,8 @@ class SLearner(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden), nn.ELU(),
             nn.Linear(hidden, hidden), nn.ELU(),
-            nn.Linear(hidden, hidden), nn.ELU(),
-            nn.Linear(hidden, outcome_hidden), nn.ELU(),
-            nn.Linear(outcome_hidden, 1),
+            nn.Linear(hidden, hidden // 2), nn.ELU(),
+            nn.Linear(hidden // 2, 1),
         )
 
     def forward(self, x_cat, x_num, treatment):

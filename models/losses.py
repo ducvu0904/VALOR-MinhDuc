@@ -107,7 +107,7 @@ class FocalZILNLoss(nn.Module):
         )
         loss_prop = (alpha_t * focal_weight * bce).mean()
 
-        # ---------- Revenue loss (unchanged) ----------
+        # ---------- Revenue loss ----------
         pos_mask = y > 0
         if pos_mask.sum() > 0:
             log_y = torch.log(y[pos_mask])
