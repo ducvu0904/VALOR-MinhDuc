@@ -12,11 +12,15 @@ Loss hierarchy
 4. VALORLoss           — combines Focal-ZILN + ranking (+ optional IPM)
 """
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from utils.ziln_utils import clamp_sigma, SIGMA_MIN, SIGMA_MAX
+
+# Precomputed constant — avoids torch.tensor allocation every batch
+LOG_2PI = math.log(2 * math.pi)
 
 
 # ===================================================================
@@ -62,7 +66,7 @@ class ZILNLoss(nn.Module):
             # NLL of LogNormal
             loss_rev = (
                 torch.log(sigma_pos)
-                + 0.5 * torch.log(torch.tensor(2 * torch.pi, device=y.device))
+                + 0.5 * LOG_2PI
                 + (log_y - mu_pos).pow(2) / (2 * sigma_pos.pow(2))
             ).mean()
         else:
@@ -115,7 +119,7 @@ class FocalZILNLoss(nn.Module):
             sigma_pos = sigma[pos_mask]
             loss_rev = (
                 torch.log(sigma_pos)
-                + 0.5 * torch.log(torch.tensor(2 * torch.pi, device=y.device))
+                + 0.5 * LOG_2PI
                 + (log_y - mu_pos).pow(2) / (2 * sigma_pos.pow(2))
             ).mean()
         else:
@@ -231,3 +235,62 @@ class VALORLoss(nn.Module):
             components["ipm"] = ipm_loss.item()
 
         return total, components
+
+
+# ===================================================================
+# 5.  RERUM Ranking Losses
+# ===================================================================
+class PairwiseRankingLoss(nn.Module):
+    """
+    Response Ranking Learning (§3.2 of RERUM).
+    Penalizes pairs where the relative ordering of predicted revenues
+    is inconsistent with the actual revenues.
+    """
+    def _group_loss(self, y_hat: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        if len(y) < 2:
+            return torch.tensor(0.0, device=y.device)
+        y_diff = y.unsqueeze(1) - y.unsqueeze(0)
+        yhat_diff = y_hat.unsqueeze(1) - y_hat.unsqueeze(0)
+        # Only penalise pairs where the ordering is reversed
+        wrong_order = (y_diff * yhat_diff) < 0
+        penalty = (yhat_diff - y_diff).abs() * wrong_order.float()
+        n_pairs = wrong_order.float().sum().clamp(min=1.0)
+        return penalty.sum() / n_pairs
+
+    def forward(self, y_hat_t, y_t, y_hat_c, y_c):
+        """
+        Parameters
+        ----------
+        y_hat_t, y_t : predicted and true outcomes for treated
+        y_hat_c, y_c : predicted and true outcomes for control
+        """
+        loss_t = self._group_loss(y_hat_t, y_t)
+        loss_c = self._group_loss(y_hat_c, y_c)
+        return (loss_t + loss_c) / 2.0
+
+
+class ListwiseUpliftLoss(nn.Module):
+    """
+    Uplift Ranking Learning (§3.3 of RERUM).
+    Optimizes the global ranking of responders using a softmax-based
+    cross-entropy loss over the predicted uplifts.
+    """
+    def forward(self, tau_hat, y1, y0, treatment):
+        """
+        Parameters
+        ----------
+        tau_hat   : (B,) predicted uplift
+        y1, y0    : potential outcomes (labels used as proxies)
+        treatment : (B,) treatment indicator
+        """
+        log_softmax_tau = F.log_softmax(tau_hat, dim=0)
+        mask_t = (treatment == 1)
+        mask_c = (treatment == 0)
+        loss = torch.tensor(0.0, device=tau_hat.device)
+        if mask_t.sum() > 0:
+            treated_term = (y1[mask_t] * log_softmax_tau[mask_t]).mean()
+            loss = loss - treated_term
+        if mask_c.sum() > 0:
+            control_term = (y0[mask_c] * log_softmax_tau[mask_c]).mean()
+            loss = loss + control_term
+        return loss

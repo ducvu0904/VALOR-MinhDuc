@@ -183,10 +183,9 @@ class DragonNet(nn.Module):
         self.y1_head = _OutcomeHead(hidden, hidden, use_ziln)
 
         # Propensity head  P(T=1 | X)
-        self.propensity_head = nn.Sequential(
-            nn.Linear(hidden, hidden // 2), nn.ELU(),
-            nn.Linear(hidden // 2, 1),
-        )
+        self.propensity_head = nn.Linear(hidden, 1)
+
+        self.epsilon = nn.Parameter(torch.zeros(1))
 
     def get_representation(self, x_cat, x_num):
         emb = self.embedding(x_cat, x_num)
@@ -197,7 +196,11 @@ class DragonNet(nn.Module):
         y0 = self.y0_head(z)
         y1 = self.y1_head(z)
         propensity_logit = self.propensity_head(z).squeeze(-1)
-        return y0, y1, propensity_logit
+        
+        t_pred = torch.sigmoid(propensity_logit)
+        eps = self.epsilon.expand(propensity_logit.shape[0])
+        
+        return y0, y1, propensity_logit, eps
 
     def predict_uplift(self, x_cat, x_num):
         out = self.forward(x_cat, x_num)
@@ -577,10 +580,14 @@ class CausalForestWrapper:
 
     def __init__(self, n_estimators: int = 20, max_depth: int = 6, random_state: int = 42):
         from econml.dml import CausalForestDML
+        from sklearn.linear_model import LinearRegression
         self.model = CausalForestDML(
+            model_y=LinearRegression(),
+            model_t=LinearRegression(),
             n_estimators=n_estimators,
             max_depth=max_depth,
             random_state=random_state,
+            n_jobs=-1,
         )
 
     def fit(self, X, treatment, y):

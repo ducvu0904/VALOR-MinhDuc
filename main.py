@@ -11,9 +11,10 @@ from dataset.dataloader import get_dataloaders, _identify_columns
 
 from models.baselines import TARNet, DragonNet, CFR, UniTE, EUEN, TLearner, SLearner, CausalForestWrapper
 from models.valor_net import VALOR
+from models.rerum_net import RERUMWrapper
 from models.ziln_gbdt import ZILNGBDTForest
 
-from training.trainer import BaselineTrainer, VALORTrainer
+from training.trainer import BaselineTrainer, VALORTrainer, RERUMTrainer
 from training.evaluate import evaluate_dnn_model, evaluate_tree_model
 from config import Config
 
@@ -71,6 +72,43 @@ def run_dnn_experiment(seed, args, train_loader, val_loader, test_loader, cate_d
     metrics = evaluate_dnn_model(model, test_loader, device=Config.DEVICE)
     return metrics
 
+
+def run_rerum_experiment(seed, args, train_loader, val_loader, test_loader, cate_dims, num_count):
+    set_seed(seed)
+    print(f"\n>>> Training RERUM Model with Seed: {seed}")
+
+    # Backbones for RERUM do NOT need use_ziln — the wrapper adds its own ZILN heads
+    if args.model == "TARNet":
+        backbone = TARNet(cate_dims, num_count, hidden=Config.HIDDEN_DIM)
+    elif args.model == "DragonNet":
+        backbone = DragonNet(cate_dims, num_count, hidden=Config.HIDDEN_DIM)
+    elif args.model == "CFR-WASS":
+        backbone = CFR(cate_dims, num_count, hidden=Config.HIDDEN_DIM, mode="wass")
+    elif args.model == "CFR-MMD":
+        backbone = CFR(cate_dims, num_count, hidden=Config.HIDDEN_DIM, mode="mmd")
+    elif args.model == "UniTE":
+        backbone = UniTE(cate_dims, num_count, hidden=Config.HIDDEN_DIM)
+    elif args.model == "EUEN":
+        backbone = EUEN(cate_dims, num_count, hidden=Config.HIDDEN_DIM)
+    elif args.model == "T-Learner":
+        backbone = TLearner(cate_dims, num_count, hidden=Config.HIDDEN_DIM)
+    else:
+        raise ValueError(f"RERUM does not support model: {args.model}")
+
+    model = RERUMWrapper(backbone, outcome_hidden=Config.HIDDEN_DIM // 2)
+    trainer = RERUMTrainer(
+        model, lr=Config.LR, epochs=Config.EPOCHS, device=Config.DEVICE,
+        lambda_rank=Config.LAMBDA_RANK, lambda_lu=Config.LAMBDA_LU,
+        lambda_ipm=Config.LAMBDA_IPM,
+    )
+
+    print("Training...")
+    trainer.train(train_loader, val_loader)
+
+    print("Evaluating...")
+    metrics = evaluate_dnn_model(model, test_loader, device=Config.DEVICE)
+    return metrics
+
 def run_tree_experiment(seed, args, X_train, t_train, y_train, X_test, t_test, y_test):
     set_seed(seed)
     print(f"\n>>> Training Tree Model with Seed: {seed}")
@@ -92,6 +130,8 @@ def get_model_name(args):
     """Constructs a descriptive model name based on active flags."""
     name = args.model
     flags = []
+    if args.rerum:
+        flags.append("RERUM")
     if args.use_ziln:
         flags.append("ZILN")
     if args.use_focal:
@@ -134,6 +174,8 @@ def main():
                         choices=["TARNet", "DragonNet", "CFR-WASS", "CFR-MMD", "UniTE", "EUEN", 
                                  "T-Learner", "S-Learner", "CausalForest", "ZILN-GBDT"],
                         help="Base model architecture to use.")
+    parser.add_argument("--rerum", action="store_true",
+                        help="Wrap backbone with RERUM (ZILN + pairwise + listwise losses).")
     parser.add_argument("--use_ziln", action="store_true", help="Enable ZILN head (RERUM mode).")
     parser.add_argument("--use_focal", action="store_true", help="Enable Focal-ZILN loss (requires --use_ziln).")
     parser.add_argument("--use_gating", action="store_true", help="Enable Treatment-Gated Interaction (requires --use_ziln).")
@@ -189,7 +231,10 @@ def main():
         )
 
         for seed in Config.SEEDS:
-            metrics = run_dnn_experiment(seed, args, train_loader, val_loader, test_loader, cate_dims, num_count)
+            if args.rerum:
+                metrics = run_rerum_experiment(seed, args, train_loader, val_loader, test_loader, cate_dims, num_count)
+            else:
+                metrics = run_dnn_experiment(seed, args, train_loader, val_loader, test_loader, cate_dims, num_count)
             for k, v in metrics.items():
                 if v is not None:
                     all_metrics[k].append(v)

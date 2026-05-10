@@ -110,9 +110,18 @@ def get_dataloaders(
     val_ds = UpliftDataset(df.iloc[val_idx].reset_index(drop=True))
     test_ds = UpliftDataset(df.iloc[test_idx].reset_index(drop=True))
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True,
+        num_workers=8, pin_memory=True, persistent_workers=True, prefetch_factor=2
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=batch_size, shuffle=False,
+        num_workers=8, pin_memory=True, persistent_workers=True, prefetch_factor=2
+    )
+    test_loader = DataLoader(
+        test_ds, batch_size=batch_size, shuffle=False,
+        num_workers=8, pin_memory=True, persistent_workers=True, prefetch_factor=2
+    )
 
     cate_dims = get_cate_dims(df)
     _, num_cols = _identify_columns(df)

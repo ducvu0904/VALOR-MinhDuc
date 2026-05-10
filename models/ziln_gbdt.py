@@ -288,23 +288,29 @@ class ZILNGBDTForest:
         self.trees = []
 
     def fit(self, X, treatment, y):
+        from joblib import Parallel, delayed
         rng = np.random.RandomState(self.random_state)
         N = len(X)
-        self.trees = []
-
-        for i in range(self.n_estimators):
+        
+        seeds = [self.random_state + i for i in range(self.n_estimators)]
+        
+        def _train_tree(s):
             # Bagging: sample with replacement
-            idx = rng.choice(N, size=int(N * self.subsample_ratio), replace=True)
+            bag_rng = np.random.RandomState(s)
+            idx = bag_rng.choice(N, size=int(N * self.subsample_ratio), replace=True)
             tree = ZILNUpliftTree(
                 max_depth=self.max_depth,
                 min_samples_leaf=self.min_samples_leaf,
                 alpha_reg=self.alpha_reg,
                 max_features=self.max_features,
-                random_state=self.random_state + i,
+                random_state=s,
             )
             tree.fit(X[idx], treatment[idx], y[idx])
-            self.trees.append(tree)
+            return tree
 
+        self.trees = Parallel(n_jobs=-1)(
+            delayed(_train_tree)(s) for s in seeds
+        )
         return self
 
     def predict_uplift(self, X):

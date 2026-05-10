@@ -5,14 +5,21 @@ Trainers for baseline and VALOR models.
  • VALORTrainer     — trains VALOR models with full Focal-ZILN + ranking
 """
 
+import math
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 
-from models.losses import ZILNLoss, FocalZILNLoss, VALORLoss
-from utils.ziln_utils import ziln_expected_value
+from models.losses import (
+    ZILNLoss, FocalZILNLoss, VALORLoss,
+    PairwiseRankingLoss, ListwiseUpliftLoss
+)
+from utils.ziln_utils import ziln_expected_value, clamp_sigma
+
+LOG_2PI = math.log(2 * math.pi)
 
 
 # =====================================================================
@@ -83,11 +90,17 @@ class BaselineTrainer:
             total_loss = self.loss_fn(pred, label)
             return total_loss
 
-        # Unpack y0, y1 (and possibly extras)
+        # Unpack outputs based on model type
         if model_name == "DragonNet":
-            y0, y1, prop_logit = model_out
+            y0, y1, prop_logit, eps = model_out
         elif model_name == "CFR":
             y0, y1, ipm_loss = model_out
+        elif model_name == "UniTE":
+            mu_prog, tau = model_out[:2]
+            y0, y1 = mu_prog, tau   # kept for ZILN path below
+        elif model_name == "EUEN":
+            control, uplift = model_out[:2]
+            y0, y1 = control, uplift  # kept for ZILN path below
         else:
             y0, y1 = model_out[:2]
 
@@ -118,16 +131,43 @@ class BaselineTrainer:
             total_loss = loss_c + loss_t
         else:
             # MSE on factual outcomes
-            # y0, y1 are scalars
-            pred = torch.where(mask_t, y1, y0)
+            if model_name == "UniTE":
+                # mu_prog + T*tau is the factual prediction
+                mu_prog, tau = y0, y1
+                pred = mu_prog + t.float() * tau
+            elif model_name == "EUEN":
+                # control + T*uplift is the factual prediction
+                control, uplift = y0, y1
+                pred = control + t.float() * uplift
+            else:
+                pred = torch.where(mask_t, y1, y0)
             total_loss = self.loss_fn(pred, label)
 
-        # DragonNet propensity loss
+        # DragonNet propensity loss and targeted regularization
         if model_name == "DragonNet":
             prop_loss = F.binary_cross_entropy_with_logits(
                 prop_logit, treatment, reduction="mean"
             )
-            total_loss = total_loss + self.lambda_prop * prop_loss
+            
+            # Targeted regularization
+            t_pred = torch.sigmoid(prop_logit)
+            t_pred_clipped = (t_pred + 0.01) / 1.02
+            
+            if self.use_ziln:
+                y0_pred = ziln_expected_value(torch.sigmoid(pi0), mu0, sig0)
+                y1_pred = ziln_expected_value(torch.sigmoid(pi1), mu1, sig1)
+            else:
+                y0_pred, y1_pred = y0, y1
+                
+            t_float = t.float()
+            y_pred = t_float * y1_pred + (1 - t_float) * y0_pred
+            h = (t_float / t_pred_clipped) - ((1 - t_float) / (1 - t_pred_clipped))
+            y_pert = y_pred + eps * h
+
+            label_std = label.std().clamp(min=1.0)
+            targeted_regularization = torch.mean((label - y_pert)**2)
+            
+            total_loss = total_loss + prop_loss
 
         # CFR IPM loss
         if model_name == "CFR" and ipm_loss is not None:
@@ -136,9 +176,12 @@ class BaselineTrainer:
         return total_loss
 
     def train(self, train_loader, val_loader=None):
-        """Full training loop."""
+        """Full training loop. Restores best-val-loss checkpoint at the end."""
         model = self.model
         history = {"train_loss": [], "val_loss": []}
+
+        best_val_loss = float("inf")
+        best_state = copy.deepcopy(model.state_dict())
 
         for epoch in range(self.epochs):
             model.train()
@@ -171,7 +214,7 @@ class BaselineTrainer:
             avg_train_loss = epoch_loss / max(n_batches, 1)
             history["train_loss"].append(avg_train_loss)
 
-            # Validation
+            # Validation + checkpointing
             if val_loader is not None:
                 val_loss = self._eval_loss(val_loader)
                 history["val_loss"].append(val_loss)
@@ -179,12 +222,17 @@ class BaselineTrainer:
                     f"Epoch {epoch+1}/{self.epochs} | "
                     f"Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f}"
                 )
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_state = copy.deepcopy(model.state_dict())
             else:
                 print(
                     f"Epoch {epoch+1}/{self.epochs} | "
                     f"Train Loss: {avg_train_loss:.4f}"
                 )
 
+        # Restore best checkpoint
+        model.load_state_dict(best_state)
         return history
 
     @torch.no_grad()
@@ -252,13 +300,22 @@ class VALORTrainer:
             self.loss_fn = VALORLoss(
                 gamma=gamma, alpha=alpha, lambda_rank=lambda_rank
             )
+            # Store FocalZILN ref for re-use in the training loop (Bug 3 fix)
+            self._focal_ziln = self.loss_fn.focal_ziln
         else:
             self.loss_fn = FocalZILNLoss(gamma=gamma, alpha=alpha)
+            self._focal_ziln = self.loss_fn
+
+        # A separate instance for validation (no ranking, no grad)
+        self._val_focal_ziln = FocalZILNLoss(gamma=gamma, alpha=alpha)
 
     def train(self, train_loader, val_loader=None):
-        """Full training loop."""
+        """Full training loop. Restores best-val-loss checkpoint at the end."""
         model = self.model
         history = {"train_loss": [], "val_loss": []}
+
+        best_val_loss = float("inf")
+        best_state = copy.deepcopy(model.state_dict())
 
         for epoch in range(self.epochs):
             model.train()
@@ -285,21 +342,16 @@ class VALORTrainer:
                 loss_parts = torch.tensor(0.0, device=self.device)
 
                 if self.use_ranking:
-                    # Compute factual loss manually then add ranking
-                    focal_ziln = FocalZILNLoss(
-                        gamma=self.loss_fn.focal_ziln.gamma,
-                        alpha=self.loss_fn.focal_ziln.alpha,
-                    )
-
+                    # Compute factual loss using the stored _focal_ziln (Bug 3 fix)
                     if mask_c.sum() > 0:
-                        loss_c = focal_ziln(
+                        loss_c = self._focal_ziln(
                             pi0[mask_c], mu0[mask_c], sig0[mask_c], label[mask_c]
                         )
                     else:
                         loss_c = torch.tensor(0.0, device=self.device)
 
                     if mask_t.sum() > 0:
-                        loss_t = focal_ziln(
+                        loss_t = self._focal_ziln(
                             pi1[mask_t], mu1[mask_t], sig1[mask_t], label[mask_t]
                         )
                     else:
@@ -307,12 +359,7 @@ class VALORTrainer:
 
                     l_fl_ziln = loss_c + loss_t
 
-                    # Predicted uplift for ranking
-                    with torch.no_grad():
-                        ev0 = ziln_expected_value(torch.sigmoid(pi0), mu0, sig0)
-                        ev1 = ziln_expected_value(torch.sigmoid(pi1), mu1, sig1)
-
-                    # We need gradients through tau_hat for ranking
+                    # Predicted uplift for ranking — needs gradients (Bug 2 fix: removed dead no_grad block)
                     tau_hat = (
                         ziln_expected_value(torch.sigmoid(pi1), mu1, sig1)
                         - ziln_expected_value(torch.sigmoid(pi0), mu0, sig0)
@@ -360,7 +407,7 @@ class VALORTrainer:
             avg_train_loss = epoch_loss / max(n_batches, 1)
             history["train_loss"].append(avg_train_loss)
 
-            # Validation
+            # Validation + checkpointing
             if val_loader is not None:
                 val_loss = self._eval_loss(val_loader)
                 history["val_loss"].append(val_loss)
@@ -368,19 +415,23 @@ class VALORTrainer:
                     f"Epoch {epoch+1}/{self.epochs} | "
                     f"Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f}"
                 )
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_state = copy.deepcopy(model.state_dict())
             else:
                 print(
                     f"Epoch {epoch+1}/{self.epochs} | "
                     f"Train Loss: {avg_train_loss:.4f}"
                 )
 
+        # Restore best checkpoint
+        model.load_state_dict(best_state)
         return history
 
     @torch.no_grad()
     def _eval_loss(self, loader):
         """Validation loss (Focal-ZILN only, no ranking for speed)."""
         self.model.eval()
-        focal_ziln = FocalZILNLoss()
         total = 0.0
         n = 0
 
@@ -397,15 +448,121 @@ class VALORTrainer:
 
             loss = torch.tensor(0.0, device=self.device)
             if mask_c.sum() > 0:
-                loss = loss + focal_ziln(
+                loss = loss + self._val_focal_ziln(
                     pi0[mask_c], mu0[mask_c], sig0[mask_c], label[mask_c]
                 )
             if mask_t.sum() > 0:
-                loss = loss + focal_ziln(
+                loss = loss + self._val_focal_ziln(
                     pi1[mask_t], mu1[mask_t], sig1[mask_t], label[mask_t]
                 )
 
             total += loss.item()
             n += 1
 
+        return total / max(n, 1)
+
+
+# =====================================================================
+#  RERUM Trainer
+# =====================================================================
+
+class RERUMTrainer:
+    """
+    Trains a RERUMWrapper model with ZILN + pairwise + listwise losses.
+    """
+    def __init__(
+        self, model, lr=5e-4, epochs=30, device="cpu",
+        lambda_rank=1.0, lambda_lu=1.0, lambda_ipm=1.0
+    ):
+        self.model = model.to(device)
+        self.device = device
+        self.epochs = epochs
+        self.lambda_rank = lambda_rank
+        self.lambda_lu = lambda_lu
+        self.lambda_ipm = lambda_ipm
+
+        self.optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        self._ziln = ZILNLoss()
+        self._pair = PairwiseRankingLoss()
+        self._listwise = ListwiseUpliftLoss()
+
+    def train(self, train_loader, val_loader=None):
+        model = self.model
+        history = {"train_loss": [], "val_loss": []}
+        best_val_loss = float("inf")
+        best_state = copy.deepcopy(model.state_dict())
+
+        for epoch in range(self.epochs):
+            model.train()
+            epoch_loss, n_batches = 0.0, 0
+            for batch in train_loader:
+                x_cat, x_num, treatment, label, _ = [b.to(self.device) for b in batch]
+                self.optimizer.zero_grad()
+                y0_p, y1_p, extras = model.forward_with_treatment(x_cat, x_num, treatment)
+                
+                # ZILN
+                mask_t, mask_c = (treatment == 1), (treatment == 0)
+                loss_ziln = torch.tensor(0.0, device=self.device)
+                if mask_c.sum() > 0:
+                    loss_ziln += self._ziln(y0_p[0][mask_c], y0_p[1][mask_c], y0_p[2][mask_c], label[mask_c])
+                if mask_t.sum() > 0:
+                    loss_ziln += self._ziln(y1_p[0][mask_t], y1_p[1][mask_t], y1_p[2][mask_t], label[mask_t])
+                
+                # Ranking
+                y_h0 = ziln_expected_value(torch.sigmoid(y0_p[0]), y0_p[1], y0_p[2])
+                y_h1 = ziln_expected_value(torch.sigmoid(y1_p[0]), y1_p[1], y1_p[2])
+                tau_h = y_h1 - y_h0
+                loss_p = self._pair(y_h1[mask_t], label[mask_t], y_h0[mask_c], label[mask_c]) if (mask_t.sum()>1 or mask_c.sum()>1) else torch.tensor(0.0, device=self.device)
+                loss_l = self._listwise(tau_h, label, label, treatment)
+                
+                total_loss = loss_ziln + self.lambda_rank * loss_p + self.lambda_lu * loss_l
+                if "ipm_loss" in extras and extras["ipm_loss"] is not None:
+                    total_loss += extras.get("lambda_ipm", self.lambda_ipm) * extras["ipm_loss"]
+                
+                total_loss.backward()
+                self.optimizer.step()
+                epoch_loss += total_loss.item()
+                n_batches += 1
+
+            avg_train = epoch_loss / max(n_batches, 1)
+            history["train_loss"].append(avg_train)
+            if val_loader:
+                val_loss = self._eval_loss(val_loader)
+                history["val_loss"].append(val_loss)
+                print(f"Epoch {epoch+1}/{self.epochs} | Train Loss: {avg_train:.4f} | Val Loss: {val_loss:.4f}")
+                if val_loss < best_val_loss:
+                    best_val_loss, best_state = val_loss, copy.deepcopy(model.state_dict())
+            else:
+                print(f"Epoch {epoch+1}/{self.epochs} | Train Loss: {avg_train:.4f}")
+
+        model.load_state_dict(best_state)
+        return history
+
+    @torch.no_grad()
+    def _eval_loss(self, loader):
+        self.model.eval()
+        total, n = 0.0, 0
+        for batch in loader:
+            x_cat, x_num, treatment, label, _ = [b.to(self.device) for b in batch]
+            y0_p, y1_p, extras = self.model.forward_with_treatment(x_cat, x_num, treatment)
+            mask_t, mask_c = (treatment == 1), (treatment == 0)
+            
+            loss_ziln = torch.tensor(0.0, device=self.device)
+            if mask_c.sum() > 0:
+                loss_ziln += self._ziln(y0_p[0][mask_c], y0_p[1][mask_c], y0_p[2][mask_c], label[mask_c])
+            if mask_t.sum() > 0:
+                loss_ziln += self._ziln(y1_p[0][mask_t], y1_p[1][mask_t], y1_p[2][mask_t], label[mask_t])
+            
+            y_h0 = ziln_expected_value(torch.sigmoid(y0_p[0]), y0_p[1], y0_p[2])
+            y_h1 = ziln_expected_value(torch.sigmoid(y1_p[0]), y1_p[1], y1_p[2])
+            tau_h = y_h1 - y_h0
+            loss_p = self._pair(y_h1[mask_t], label[mask_t], y_h0[mask_c], label[mask_c]) if (mask_t.sum()>1 or mask_c.sum()>1) else torch.tensor(0.0, device=self.device)
+            loss_l = self._listwise(tau_h, label, label, treatment)
+            
+            total_loss = loss_ziln + self.lambda_rank * loss_p + self.lambda_lu * loss_l
+            if "ipm_loss" in extras and extras["ipm_loss"] is not None:
+                total_loss += extras.get("lambda_ipm", self.lambda_ipm) * extras["ipm_loss"]
+                
+            total += total_loss.item()
+            n += 1
         return total / max(n, 1)

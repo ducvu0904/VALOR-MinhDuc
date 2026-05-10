@@ -145,7 +145,7 @@ def create_synthetic_data(
 
     # 5. Generate Outcome (ZILN Distribution)
     # --- A. Propensity (Gate) Generation ---
-    # Baseline bias shifted to -1.5 to enforce >80% non-conversion sparsity
+    # Baseline bias shifted to -2 to enforce >80% non-conversion sparsity
     base_logits = -2 + 0.5 * feat_user + 0.2 * feat_item
     prob_c = 1 / (1 + np.exp(-base_logits))
     prob_t = 1 / (1 + np.exp(-(base_logits + 0.3 + 0.1 * feat_interaction)))
