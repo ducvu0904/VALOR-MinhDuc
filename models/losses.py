@@ -165,7 +165,7 @@ class ValueWeightedRankingLoss(nn.Module):
         w = torch.log1p(z_diff.abs())
 
         # Logistic surrogate
-        logistic = torch.log1p(torch.exp(-sign * tau_diff))
+        logistic = F.softplus(-sign * tau_diff)
 
         # Weighted sum (exclude diagonal where z_diff == 0)
         mask = (z_diff.abs() > 1e-8).float()

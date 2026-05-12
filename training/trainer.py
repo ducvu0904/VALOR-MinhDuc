@@ -364,7 +364,7 @@ class VALORTrainer:
                         ziln_expected_value(torch.sigmoid(pi1), mu1, sig1)
                         - ziln_expected_value(torch.sigmoid(pi0), mu0, sig0)
                     )
-                    z = label  # ground-truth proxy
+                    z = (2.0 * treatment.float() - 1.0) * label  # sign-adjusted transformed outcome
 
                     ranking_loss = self.loss_fn.ranking(tau_hat, z)
                     total_loss = (

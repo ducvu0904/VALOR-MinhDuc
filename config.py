@@ -15,7 +15,7 @@ class Config:
     
     # Loss Hyperparameters
     FOCAL_GAMMA = 2.0
-    FOCAL_ALPHA = 0.25
+    FOCAL_ALPHA = 0.9
     LAMBDA_RANK = 1e-4
     LAMBDA_LU   = 0.01
     LAMBDA_IPM  = 1.0
