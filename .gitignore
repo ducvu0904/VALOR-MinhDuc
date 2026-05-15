@@ -1,0 +1,19 @@
+# Data
+dataset/Hillstrom/
+dataset_cache.pkl
+
+# IDEs
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+env/
+venv/
+
+# Results
+result/*.csv
+!result/README.md

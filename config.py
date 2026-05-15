@@ -3,7 +3,7 @@ import torch
 class Config:
     # Data generation
     N_UID = 5000
-    N_PID = 50000
+    N_PID = 500000
     
     # Training Hyperparameters
     SEEDS = [42, 123, 456, 789, 1024]
@@ -12,7 +12,7 @@ class Config:
     BATCH_SIZE = 512
     HIDDEN_DIM = 256
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    
+     
     # Loss Hyperparameters
     FOCAL_GAMMA = 2.0
     FOCAL_ALPHA = 0.9

@@ -65,7 +65,7 @@ class BaselineTrainer:
         self.lambda_ipm = lambda_ipm
         self.lambda_prop = lambda_prop
 
-        self.optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        self.optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
 
         # Determine loss function
         use_ziln = getattr(model, "use_ziln", False)
@@ -512,8 +512,14 @@ class RERUMTrainer:
                 y_h0 = ziln_expected_value(torch.sigmoid(y0_p[0]), y0_p[1], y0_p[2])
                 y_h1 = ziln_expected_value(torch.sigmoid(y1_p[0]), y1_p[1], y1_p[2])
                 tau_h = y_h1 - y_h0
-                loss_p = self._pair(y_h1[mask_t], label[mask_t], y_h0[mask_c], label[mask_c]) if (mask_t.sum()>1 or mask_c.sum()>1) else torch.tensor(0.0, device=self.device)
-                loss_l = self._listwise(tau_h, label, label, treatment)
+                
+                loss_p = torch.tensor(0.0, device=self.device)
+                if self.lambda_rank > 0 and (mask_t.sum() > 1 or mask_c.sum() > 1):
+                    loss_p = self._pair(y_h1[mask_t], label[mask_t], y_h0[mask_c], label[mask_c])
+                    
+                loss_l = torch.tensor(0.0, device=self.device)
+                if self.lambda_lu > 0:
+                    loss_l = self._listwise(tau_h, label, label, treatment)
                 
                 total_loss = loss_ziln + self.lambda_rank * loss_p + self.lambda_lu * loss_l
                 if "ipm_loss" in extras and extras["ipm_loss"] is not None:

@@ -107,4 +107,8 @@ echo "All experiments completed. Check results.csv for the aggregated metrics."
 
 ## Results
 
-After execution, all aggregated metrics (AUUC, Qini, Lift@30, KRCC, Latency) across 5 different model seeds will be appended automatically to `results.csv`.
+The aggregated metrics (AUUC, Qini, Lift@30, KRCC, Latency) are automatically appended to `results.csv` after each run. The current results were generated using the following experimental setup:
+
+- **Data Scale**: 5,000 UIDs and 50,000 PIDs.
+- **Interaction Context**: Each user is assigned 30 to 60 random product interactions (approx. 225k total samples).
+- **Evaluation**: All metrics are reported as the mean and standard deviation across 5 fixed seeds (`[42, 123, 456, 789, 1024]`).

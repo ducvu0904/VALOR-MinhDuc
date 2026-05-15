@@ -24,7 +24,7 @@ from torch.utils.data import Dataset, DataLoader
 CAT_COLUMNS = ["pid_cat_1", "pid_cat_2", "pid_cat_3", "data_cluster"]
 
 # Columns that are NOT features
-NON_FEATURE_COLS = {"y0", "y1", "true_tau", "treatment", "label"}
+NON_FEATURE_COLS = {"y0", "y1", "true_tau", "treatment", "label", "spend", "conversion", "visit"}
 
 
 def _identify_columns(df: pd.DataFrame):
@@ -64,8 +64,20 @@ class UpliftDataset(Dataset):
         self.x_cat = torch.tensor(df[cat_cols].values, dtype=torch.long)
         self.x_num = torch.tensor(df[num_cols].values, dtype=torch.float32)
         self.treatment = torch.tensor(df["treatment"].values, dtype=torch.float32)
-        self.label = torch.tensor(df["label"].values, dtype=torch.float32)
-        self.true_tau = torch.tensor(df["true_tau"].values, dtype=torch.float32)
+        
+        # Handle label mapping (synthetic vs Hillstrom)
+        if "label" in df.columns:
+            self.label = torch.tensor(df["label"].values, dtype=torch.float32)
+        elif "spend" in df.columns:
+            self.label = torch.tensor(df["spend"].values, dtype=torch.float32)
+        else:
+            raise KeyError("Dataset must contain either 'label' or 'spend' as the target variable.")
+
+        # Handle missing true_tau (real-world datasets don't have this)
+        if "true_tau" in df.columns:
+            self.true_tau = torch.tensor(df["true_tau"].values, dtype=torch.float32)
+        else:
+            self.true_tau = torch.zeros_like(self.label)
 
     def __len__(self):
         return len(self.label)
@@ -128,3 +140,36 @@ def get_dataloaders(
     num_count = len(num_cols)
 
     return train_loader, val_loader, test_loader, cate_dims, num_count
+
+def get_dataloaders_from_splits(
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    batch_size: int = 512,
+):
+    """
+    Return DataLoaders from pre-split DataFrames (e.g. Hillstrom datasets).
+    """
+    train_ds = UpliftDataset(train_df)
+    val_ds = UpliftDataset(val_df)
+    test_ds = UpliftDataset(test_df)
+
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True,
+        num_workers=8, pin_memory=True, persistent_workers=True, prefetch_factor=2
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=batch_size, shuffle=False,
+        num_workers=8, pin_memory=True, persistent_workers=True, prefetch_factor=2
+    )
+    test_loader = DataLoader(
+        test_ds, batch_size=batch_size, shuffle=False,
+        num_workers=8, pin_memory=True, persistent_workers=True, prefetch_factor=2
+    )
+
+    cate_dims = get_cate_dims(train_df)
+    _, num_cols = _identify_columns(train_df)
+    num_count = len(num_cols)
+
+    return train_loader, val_loader, test_loader, cate_dims, num_count
+

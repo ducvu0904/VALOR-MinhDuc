@@ -6,12 +6,12 @@ import torch
 import pandas as pd
 from collections import defaultdict
 
-from dataset.generate import create_synthetic_data
-from dataset.dataloader import get_dataloaders, _identify_columns
+from dataset.synthetic.generate import create_synthetic_data
+from dataset.dataloader import get_dataloaders, get_dataloaders_from_splits, _identify_columns
 
 from models.baselines import TARNet, DragonNet, CFR, UniTE, EUEN, TLearner, SLearner, CausalForestWrapper
-from models.valor_net import VALOR
-from models.rerum_net import RERUMWrapper
+from models.valor.valor_net import VALOR
+from models.rerum.rerum_net import RERUMWrapper
 from models.ziln_gbdt import ZILNGBDTForest
 
 from training.trainer import BaselineTrainer, VALORTrainer, RERUMTrainer
@@ -96,9 +96,21 @@ def run_rerum_experiment(seed, args, train_loader, val_loader, test_loader, cate
         raise ValueError(f"RERUM does not support model: {args.model}")
 
     model = RERUMWrapper(backbone, outcome_hidden=Config.HIDDEN_DIM // 2)
+    lam_rank = Config.LAMBDA_RANK if args.use_response_ranking else 0.0
+    lam_lu = Config.LAMBDA_LU if args.use_uplift_ranking else 0.0
+    
+    # If neither are set but rerun is True, RERUM implies both by default, 
+    # but since the user wants explicit flags, we use the flags directly.
+    # We default them to True if not provided to keep backward compatibility 
+    # if someone runs --rerum without flags.
+    # Wait, argparse sets them to False if not passed, because of action="store_true".
+    # So if the user explicitly passes --rerum, they MUST pass the flags, or they get ZILN only.
+    # To keep default full RERUM: if both are false, but rerum is true, maybe they meant full RERUM?
+    # Let's just strictly follow the flags. If they want full RERUM, they use both flags.
+    
     trainer = RERUMTrainer(
         model, lr=Config.LR, epochs=Config.EPOCHS, device=Config.DEVICE,
-        lambda_rank=Config.LAMBDA_RANK, lambda_lu=Config.LAMBDA_LU,
+        lambda_rank=lam_rank, lambda_lu=lam_lu,
         lambda_ipm=Config.LAMBDA_IPM,
     )
 
@@ -138,14 +150,18 @@ def get_model_name(args):
         flags.append("Focal")
     if args.use_gating:
         flags.append("GTI")
-    if args.use_ranking:
+    if getattr(args, 'use_ranking', False):
         flags.append("WR")
+    if getattr(args, 'use_uplift_ranking', False):
+        flags.append("UpliftRank")
+    if getattr(args, 'use_response_ranking', False):
+        flags.append("RespRank")
     
     if flags:
         name += " + " + " + ".join(flags)
     return name
 
-def save_to_csv(model_name, all_metrics, filename="results.csv"):
+def save_to_csv(model_name, dataset_name, all_metrics, filename="result2.csv"):
     """Appends aggregated results to a CSV file."""
     row = {"Model": model_name}
     for k, v_list in all_metrics.items():
@@ -153,7 +169,7 @@ def save_to_csv(model_name, all_metrics, filename="results.csv"):
     
     df_new = pd.DataFrame([row])
     
-    # Define column order (Model, AUUC, Qini/AUQC, Lift@30, KRCC, Latency)
+    # Define column order
     cols = ["Model", "auuc", "qini", "lift_30", "krcc", "latency_ms"]
     # Ensure all columns exist in df_new
     for c in cols:
@@ -174,12 +190,17 @@ def main():
                         choices=["TARNet", "DragonNet", "CFR-WASS", "CFR-MMD", "UniTE", "EUEN", 
                                  "T-Learner", "S-Learner", "CausalForest", "ZILN-GBDT"],
                         help="Base model architecture to use.")
+    parser.add_argument("--dataset", type=str, default="synthetic",
+                        choices=["synthetic", "hillstrom-men", "hillstrom-women"],
+                        help="Dataset to run experiments on.")
     parser.add_argument("--rerum", action="store_true",
                         help="Wrap backbone with RERUM (ZILN + pairwise + listwise losses).")
     parser.add_argument("--use_ziln", action="store_true", help="Enable ZILN head (RERUM mode).")
     parser.add_argument("--use_focal", action="store_true", help="Enable Focal-ZILN loss (requires --use_ziln).")
     parser.add_argument("--use_gating", action="store_true", help="Enable Treatment-Gated Interaction (requires --use_ziln).")
-    parser.add_argument("--use_ranking", action="store_true", help="Enable Value-Weighted Ranking Loss (requires --use_ziln).")
+    parser.add_argument("--use_ranking", action="store_true", help="Enable Value-Weighted Ranking Loss (VALOR mode).")
+    parser.add_argument("--use_uplift_ranking", action="store_true", help="Enable Listwise Uplift Ranking Loss (RERUM mode).")
+    parser.add_argument("--use_response_ranking", action="store_true", help="Enable Pairwise Response Ranking Loss (RERUM mode).")
     
     args = parser.parse_args()
 
@@ -193,31 +214,60 @@ def main():
     print(f"Dataset Seed: 42 (Fixed)")
     print(f"Model Seeds: {Config.SEEDS}")
 
-    # 1. Generate Data Once
-    df = create_synthetic_data(n_uid=Config.N_UID, n_pid=Config.N_PID, seed=42)
+    # 1. Load Data
+    is_split_dataset = args.dataset in ["hillstrom-men", "hillstrom-women"]
+    
+    if args.dataset == "synthetic":
+        cache_path = "dataset_cache.pkl"
+        if os.path.exists(cache_path):
+            print(f"📦 Loading cached dataset from {cache_path}...")
+            df = pd.read_pickle(cache_path)
+        else:
+            df = create_synthetic_data(n_uid=Config.N_UID, n_pid=Config.N_PID, seed=42)
+            print(f"💾 Saving dataset to cache {cache_path}...")
+            df.to_pickle(cache_path)
+    else:
+        # Load Hillstrom splits
+        folder_name = "Men" if args.dataset == "hillstrom-men" else "Women"
+        base_path = f"dataset/Hillstrom/{folder_name}"
+        prefix = "men" if args.dataset == "hillstrom-men" else "women"
+        
+        print(f"📦 Loading {args.dataset} from {base_path}...")
+        train_df = pd.read_csv(f"{base_path}/train_{prefix}.csv")
+        val_df = pd.read_csv(f"{base_path}/val_{prefix}.csv")
+        test_df = pd.read_csv(f"{base_path}/test_{prefix}.csv")
+        df = pd.concat([train_df, val_df, test_df], ignore_index=True) # Full dataframe for tree models if needed
     all_metrics = defaultdict(list)
 
     # 2. Run Experiments
     if args.model in ["CausalForest", "ZILN-GBDT"]:
         # Prepare Tree Data Once (Fixed Split Seed 42)
-        cat_cols, num_cols = _identify_columns(df)
-        feature_cols = cat_cols + num_cols
-        X_all = df[feature_cols].values
-        t_all = df["treatment"].values
-        y_all = df["label"].values
+        target_col = "label" if "label" in df.columns else "spend"
+        
+        if is_split_dataset:
+            cat_cols, num_cols = _identify_columns(train_df)
+            feature_cols = cat_cols + num_cols
+            X_train, t_train, y_train = train_df[feature_cols].values, train_df["treatment"].values, train_df[target_col].values
+            X_test, t_test, y_test = test_df[feature_cols].values, test_df["treatment"].values, test_df[target_col].values
+        else:
+            cat_cols, num_cols = _identify_columns(df)
+            feature_cols = cat_cols + num_cols
+            X_all = df[feature_cols].values
+            t_all = df["treatment"].values
+            y_all = df[target_col].values
 
-        N = len(df)
-        rng = np.random.RandomState(42)
-        perm = rng.permutation(N)
-        n_test = int(N * 0.1)
-        n_val = int(N * 0.2)
-        n_train = N - n_test - n_val
+            N = len(df)
+            rng = np.random.RandomState(42)
+            perm = rng.permutation(N)
+            n_test = int(N * 0.1)
+            n_val = int(N * 0.2)
+            n_train = N - n_test - n_val
 
-        train_idx = perm[:n_train]
-        test_idx = perm[n_train + n_val:]
+            train_idx = perm[:n_train]
+            test_idx = perm[n_train + n_val:]
 
-        X_train, t_train, y_train = X_all[train_idx], t_all[train_idx], y_all[train_idx]
-        X_test, t_test, y_test = X_all[test_idx], t_all[test_idx], y_all[test_idx]
+            X_train, t_train, y_train = X_all[train_idx], t_all[train_idx], y_all[train_idx]
+            X_test, t_test, y_test = X_all[test_idx], t_all[test_idx], y_all[test_idx]
 
         for seed in Config.SEEDS:
             metrics = run_tree_experiment(seed, args, X_train, t_train, y_train, X_test, t_test, y_test)
@@ -226,9 +276,14 @@ def main():
                     all_metrics[k].append(v)
     else:
         # Prepare DNN Data Once (Fixed Split Seed 42)
-        train_loader, val_loader, test_loader, cate_dims, num_count = get_dataloaders(
-            df, batch_size=Config.BATCH_SIZE, seed=42
-        )
+        if is_split_dataset:
+            train_loader, val_loader, test_loader, cate_dims, num_count = get_dataloaders_from_splits(
+                train_df, val_df, test_df, batch_size=Config.BATCH_SIZE
+            )
+        else:
+            train_loader, val_loader, test_loader, cate_dims, num_count = get_dataloaders(
+                df, batch_size=Config.BATCH_SIZE, seed=42
+            )
 
         for seed in Config.SEEDS:
             if args.rerum:
@@ -251,8 +306,17 @@ def main():
         else:
             print(f"{k}: {mean_val:.4f} ± {std_val:.4f}")
 
-    # 4. Save to CSV
-    save_to_csv(model_display_name, all_metrics)
+    # 4. Save
+    if args.dataset == "synthetic":
+        out_filename = "result/synthesis.csv"
+    elif args.dataset == "hillstrom-men":
+        out_filename = "result/hillstrom_men.csv"
+    elif args.dataset == "hillstrom-women":
+        out_filename = "result/hillstrom_women.csv"
+    else:
+        out_filename = f"result/{args.dataset}.csv"
+        
+    save_to_csv(model_display_name, args.dataset, all_metrics, filename=out_filename)
 
 if __name__ == "__main__":
     main()

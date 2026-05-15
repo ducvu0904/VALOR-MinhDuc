@@ -20,7 +20,7 @@ The same ``VALOR`` class works with any backbone that exposes:
 import torch
 import torch.nn as nn
 
-from models.gating import TreatmentGatedInteraction
+from models.valor.gating import TreatmentGatedInteraction
 from models.srm_heads import SRMHead
 from utils.ziln_utils import ziln_expected_value
 
