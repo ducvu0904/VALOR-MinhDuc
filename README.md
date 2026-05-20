@@ -12,103 +12,82 @@ Traditional uplift modeling often focuses on binary outcomes (e.g., conversion) 
 2. **Value-Weighted Ranking (`--use_ranking`)**: A pairwise ranking objective that directly optimizes the ranking of predicted uplift scores. It applies larger penalties when the model misranks pairs of customers who have a large actual revenue difference, aligning the model directly with financial impact.
 3. **Treatment-Gated Interaction (GTI) (`--use_gating`)**: An architectural enhancement that allows the shared representation layers to adapt dynamically based on the assigned treatment, capturing complex non-linear interactions between covariates and the treatment variable.
 
+## Decoupled Ranking Architecture
+
+The architecture has been modularized so that complex ranking losses are decoupled from specific wrapper classes. 
+- **Listwise Uplift Ranking (`--use_uplift_ranking`)** and **Pairwise Response Ranking (`--use_response_ranking`)** are natively supported on all standard DNN backbones (TARNet, DragonNet, CFR, etc.) without needing the RERUM wrapper.
+- **RERUM Framework (`--rerum`)**: The full multi-objective ZILN + Pairwise + Listwise wrapper architecture is strictly triggered by this explicit flag.
+
 ## Environment Setup
 
 The codebase is built in Python using PyTorch. Ensure you have the following dependencies installed:
 
 ```bash
-pip install torch numpy pandas scipy scikit-learn econml matplotlib tqdm
+pip install torch numpy pandas scipy scikit-learn econml matplotlib tqdm optuna
 ```
 
-## Running the Experiments
+## Running Experiments (Optuna Tuning)
 
-The primary entry point is `main.py`. The synthetic dataset is generated automatically on the first run and uses fixed seeds to ensure exact reproducibility across multiple runs.
+The primary entry point for reproducible evaluations is `scripts/tune.py`. This script performs rigorous hyperparameter tuning using Optuna (k-fold Monte Carlo on the validation set) and evaluates the best parameters on the held-out test set (N=10 seeds).
 
-### Command Line Arguments
+Results are automatically saved to `results/tuned/{dataset}.csv`.
+
+### Key Command Line Arguments
 
 *   `--model`: The base model architecture. Options: `TARNet`, `DragonNet`, `CFR-WASS`, `CFR-MMD`, `UniTE`, `EUEN`, `T-Learner`, `S-Learner`, `CausalForest`, `ZILN-GBDT`.
+*   `--dataset`: Dataset to run. Options: `synthetic`, `hillstrom-men`, `hillstrom-women`.
 *   `--use_ziln`: Enables the standard ZILN head (replaces standard MSE).
 *   `--use_focal`: Upgrades the ZILN head to use **Focal-ZILN** loss.
 *   `--use_gating`: Enables **Treatment-Gated Interaction (GTI)** on the backbone.
 *   `--use_ranking`: Enables **Value-Weighted Ranking (WR)** loss.
-*   `--rerum`: Runs the **RERUM** framework baseline (wraps the backbone in a multi-objective ZILN + Pairwise + Listwise architecture).
+*   `--use_uplift_ranking`: Enables listwise uplift ranking loss (available on all backbones).
+*   `--use_response_ranking`: Enables pairwise response ranking loss (available on all backbones).
+*   `--rerum`: Wraps the model in the **RERUM** architecture.
+*   `--n_trials`: Number of Optuna trials for tuning (default: 50).
 
 ### Execution Examples
 
 **1. Run Baseline Models:**
 ```bash
-python3 main.py --model TARNet
-python3 main.py --model CFR-MMD
+python scripts/tune.py --model TARNet --dataset hillstrom-men
+python scripts/tune.py --model CFR-MMD --dataset hillstrom-women
 ```
 
-**2. Run Partial VALOR Ablations:**
+**2. Run Standard Baselines with Decoupled Ranking:**
+```bash
+# TARNet with Listwise Uplift Ranking (natively on BaselineTrainer)
+python scripts/tune.py --model TARNet --use_uplift_ranking
+
+# DragonNet with Response Ranking
+python scripts/tune.py --model DragonNet --use_response_ranking
+```
+
+**3. Run Partial VALOR Ablations:**
 ```bash
 # TARNet with standard ZILN
-python3 main.py --model TARNet --use_ziln
+python scripts/tune.py --model TARNet --use_ziln
 
 # TARNet with Focal-ZILN and GTI
-python3 main.py --model TARNet --use_ziln --use_focal --use_gating
+python scripts/tune.py --model TARNet --use_ziln --use_focal --use_gating
 ```
 
-**3. Run Full VALOR Framework:**
+**4. Run Full VALOR Framework:**
 ```bash
-python3 main.py --model TARNet --use_ziln --use_focal --use_gating --use_ranking
-python3 main.py --model CFR-MMD --use_ziln --use_focal --use_gating --use_ranking
+python scripts/tune.py --model TARNet --use_ziln --use_focal --use_gating --use_ranking --dataset hillstrom-men
 ```
 
-**4. Run RERUM Baseline:**
+**5. Run RERUM Baseline:**
 ```bash
-python3 main.py --model TARNet --rerum
-```
-
-**5. Run Tree-based Baselines:**
-```bash
-python3 main.py --model CausalForest
-python3 main.py --model ZILN-GBDT
+python scripts/tune.py --model TARNet --rerum --dataset hillstrom-women
 ```
 
 ## Running the Full Test Suite
 
-To run all major ablations and baseline comparisons automatically, you can use the following bash script:
+To systematically run all major ablations and baseline comparisons across a specific dataset, use the overarching `tune_all.py` orchestration script:
 
 ```bash
-#!/bin/bash
-
-# 1. VALOR Variants (DNN + ZILN + Focal + GTI/WR)
-models=("TARNet" "DragonNet" "CFR-MMD" "CFR-WASS")
-
-for m in "${models[@]}"; do
-    echo "Running $m + ZILN + Focal + GTI..."
-    python3 main.py --model "$m" --use_ziln --use_focal --use_gating
-    
-    echo "Running $m + ZILN + Focal + WR..."
-    python3 main.py --model "$m" --use_ziln --use_focal --use_ranking
-    
-    echo "Running Full VALOR ($m + ZILN + Focal + GTI + WR)..."
-    python3 main.py --model "$m" --use_ziln --use_focal --use_gating --use_ranking
-done
-
-# 2. Specific Baseline
-python3 main.py --model CFR-WASS --use_ziln --use_focal
-
-# 3. RERUM Framework Baseline
-rerum_models=("TARNet" "DragonNet" "CFR-MMD" "CFR-WASS")
-for m in "${rerum_models[@]}"; do
-    echo "Running $m + RERUM..."
-    python3 main.py --model "$m" --rerum
-done
-
-# 4. Tree-based Models
-echo "Running Robust ZILN-GBDT..."
-python3 main.py --model ZILN-GBDT
-
-echo "All experiments completed. Check results.csv for the aggregated metrics."
+# Run all ablations (VALOR variants, RERUM variants, Baselines) automatically
+python scripts/tune_all.py --dataset hillstrom-men
 ```
 
-## Results
-
-The aggregated metrics (AUUC, Qini, Lift@30, KRCC, Latency) are automatically appended to `results.csv` after each run. The current results were generated using the following experimental setup:
-
-- **Data Scale**: 5,000 UIDs and 50,000 PIDs.
-- **Interaction Context**: Each user is assigned 30 to 60 random product interactions (approx. 225k total samples).
-- **Evaluation**: All metrics are reported as the mean and standard deviation across 5 fixed seeds (`[42, 123, 456, 789, 1024]`).
+The script manages a "skip-if-exists" mechanism to resume safely if interrupted. All aggregated metrics (AUUC, Qini, Lift@30, KRCC, Latency) will be accumulated in `results/tuned/<dataset>.csv`, tracking the mean and standard deviation across seeds.

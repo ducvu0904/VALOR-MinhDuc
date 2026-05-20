@@ -66,8 +66,8 @@ def evaluate_dnn_model(model, test_loader, device="cpu"):
     true_taus = np.concatenate(all_true_tau)
 
     # Compute metrics
-    auuc_score = auuc(labels, treatments, preds, plot=False)
-    qini_score = auqc(labels, treatments, preds, plot=False)
+    auuc_score = auuc(labels, treatments, preds, plot=False, bins= 100)
+    qini_score = auqc(labels, treatments, preds, plot=False, bins= 100)
     lift_30 = lift(labels, treatments, preds, h=0.3)
     krcc_score = krcc(labels, treatments, preds)
 

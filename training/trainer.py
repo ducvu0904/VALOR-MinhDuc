@@ -51,6 +51,7 @@ class BaselineTrainer:
         self,
         model,
         lr: float = 5e-4,
+        l2_reg: float = 1e-5,
         epochs: int = 30,
         device: str = "cpu",
         use_focal: bool = False,
@@ -58,14 +59,23 @@ class BaselineTrainer:
         focal_alpha: float = 0.25,
         lambda_ipm: float = 1.0,
         lambda_prop: float = 1.0,
+        lambda_lu: float = 0.0,
+        lambda_resrank: float = 0.0,
     ):
         self.model = model.to(device)
         self.device = device
         self.epochs = epochs
         self.lambda_ipm = lambda_ipm
         self.lambda_prop = lambda_prop
+        self.lambda_lu = lambda_lu
+        self.lambda_resrank = lambda_resrank
+        
+        if self.lambda_lu > 0:
+            self._listwise = ListwiseUpliftLoss()
+        if self.lambda_resrank > 0:
+            self._pair = PairwiseRankingLoss()
 
-        self.optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+        self.optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=l2_reg)
 
         # Determine loss function
         use_ziln = getattr(model, "use_ziln", False)
@@ -143,6 +153,30 @@ class BaselineTrainer:
                 pred = torch.where(mask_t, y1, y0)
             total_loss = self.loss_fn(pred, label)
 
+        # Extract expected values for regularization and ranking
+        if self.use_ziln:
+            y0_pred = ziln_expected_value(torch.sigmoid(pi0), mu0, sig0)
+            y1_pred = ziln_expected_value(torch.sigmoid(pi1), mu1, sig1)
+        else:
+            if model_name == "UniTE" or model_name == "EUEN":
+                # For UniTE: y0=mu_prog, y1=tau -> y1_pred = y0 + y1
+                # For EUEN: y0=control, y1=uplift -> y1_pred = y0 + y1
+                y0_pred = y0
+                y1_pred = y0 + y1
+            else:
+                y0_pred = y0
+                y1_pred = y1
+
+        # Response and Uplift Ranking Losses
+        if getattr(self, "lambda_resrank", 0.0) > 0 and (mask_t.sum() > 1 or mask_c.sum() > 1):
+            loss_p = self._pair(y1_pred[mask_t], label[mask_t], y0_pred[mask_c], label[mask_c])
+            total_loss = total_loss + self.lambda_resrank * loss_p
+            
+        if getattr(self, "lambda_lu", 0.0) > 0:
+            tau_hat = y1_pred - y0_pred
+            loss_l = self._listwise(tau_hat, label, label, treatment)
+            total_loss = total_loss + self.lambda_lu * loss_l
+
         # DragonNet propensity loss and targeted regularization
         if model_name == "DragonNet":
             prop_loss = F.binary_cross_entropy_with_logits(
@@ -152,12 +186,6 @@ class BaselineTrainer:
             # Targeted regularization
             t_pred = torch.sigmoid(prop_logit)
             t_pred_clipped = (t_pred + 0.01) / 1.02
-            
-            if self.use_ziln:
-                y0_pred = ziln_expected_value(torch.sigmoid(pi0), mu0, sig0)
-                y1_pred = ziln_expected_value(torch.sigmoid(pi1), mu1, sig1)
-            else:
-                y0_pred, y1_pred = y0, y1
                 
             t_float = t.float()
             y_pred = t_float * y1_pred + (1 - t_float) * y0_pred
@@ -282,6 +310,7 @@ class VALORTrainer:
         self,
         model,
         lr: float = 5e-4,
+        l2_reg: float = 1e-5,
         epochs: int = 30,
         device: str = "cpu",
         gamma: float = 2.0,
@@ -294,7 +323,7 @@ class VALORTrainer:
         self.epochs = epochs
         self.use_ranking = use_ranking
 
-        self.optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        self.optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=l2_reg)
 
         if use_ranking:
             self.loss_fn = VALORLoss(
@@ -471,7 +500,7 @@ class RERUMTrainer:
     Trains a RERUMWrapper model with ZILN + pairwise + listwise losses.
     """
     def __init__(
-        self, model, lr=5e-4, epochs=30, device="cpu",
+        self, model, lr=5e-4, l2_reg=1e-5, epochs=30, device="cpu",
         lambda_rank=1.0, lambda_lu=1.0, lambda_ipm=1.0
     ):
         self.model = model.to(device)
@@ -481,7 +510,7 @@ class RERUMTrainer:
         self.lambda_lu = lambda_lu
         self.lambda_ipm = lambda_ipm
 
-        self.optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        self.optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=l2_reg)
         self._ziln = ZILNLoss()
         self._pair = PairwiseRankingLoss()
         self._listwise = ListwiseUpliftLoss()
