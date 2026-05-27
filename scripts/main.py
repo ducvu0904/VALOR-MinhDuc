@@ -16,8 +16,9 @@ from models.baselines import TARNet, DragonNet, CFR, UniTE, EUEN, TLearner, SLea
 from models.valor.valor_net import VALOR
 from models.rerum.rerum_net import RERUMWrapper
 from models.ziln_gbdt import ZILNGBDTForest
+from models.efin import EFIN
 
-from training.trainer import BaselineTrainer, VALORTrainer, RERUMTrainer
+from training.trainer import BaselineTrainer, VALORTrainer, RERUMTrainer, EFINTrainer
 from training.evaluate import evaluate_dnn_model, evaluate_tree_model
 from config import Config, default_hparams
 
@@ -57,6 +58,13 @@ def _build_dnn_backbone(args, cate_dims, num_count, hparams: dict, use_ziln: boo
         return TLearner(cate_dims, num_count, hidden=hidden, use_ziln=use_ziln)
     elif args.model == "S-Learner":
         return SLearner(cate_dims, num_count, hidden=hidden)
+    elif args.model == "EFIN":
+        return EFIN(
+            cate_dims, num_count,
+            treatment_dim=1,   # binary scalar treatment
+            hidden_dim=hidden,
+            use_ziln=use_ziln,
+        )
     else:
         raise ValueError(f"Unknown DNN model: {args.model}")
 
@@ -77,6 +85,29 @@ def run_dnn_experiment(seed, args, train_loader, val_loader, test_loader,
 
     backbone = _build_dnn_backbone(args, cate_dims, num_count, hparams)
 
+    # ── EFIN: self-contained model + dedicated trainer ─────────────────────
+    if args.model == "EFIN":
+        model = backbone
+        trainer = EFINTrainer(
+            model,
+            lr=hparams["lr"],
+            l2_reg=hparams["l2_reg"],
+            epochs=hparams["epochs"],
+            device=Config.DEVICE,
+            lambda_c=hparams.get("lambda_c", 1.0),
+            use_focal=args.use_focal,
+            focal_gamma=hparams["focal_gamma"],
+            focal_alpha=hparams["focal_alpha"],
+            checkpoint_metric=getattr(args, "checkpoint_metric", "val_loss"),
+        )
+        print("Training...")
+        history = trainer.train(train_loader, val_loader)
+        best_val_loss = min(history["val_loss"]) if (val_loader is not None and "val_loss" in history) else 0.0
+        print("Evaluating...")
+        metrics = evaluate_dnn_model(model, eval_loader, device=Config.DEVICE)
+        metrics["val_loss"] = best_val_loss
+        return metrics
+
     if args.use_gating or args.use_ranking:
         model = VALOR(backbone, use_gating=args.use_gating)
         trainer = VALORTrainer(
@@ -89,6 +120,7 @@ def run_dnn_experiment(seed, args, train_loader, val_loader, test_loader,
             alpha=hparams["focal_alpha"],
             lambda_rank=hparams["lambda_rank"],
             use_ranking=args.use_ranking,
+            checkpoint_metric=getattr(args, "checkpoint_metric", "val_loss"),
         )
     else:
         lam_lu   = hparams.get("lambda_lu", 0.0)   if getattr(args, "use_uplift_ranking", False) else 0.0
@@ -108,6 +140,7 @@ def run_dnn_experiment(seed, args, train_loader, val_loader, test_loader,
             lambda_prop=hparams["lambda_prop"],
             lambda_lu=lam_lu,
             lambda_resrank=lam_rank,
+            checkpoint_metric=getattr(args, "checkpoint_metric", "val_loss"),
         )
 
     print("Training...")
@@ -150,6 +183,7 @@ def run_rerum_experiment(seed, args, train_loader, val_loader, test_loader,
         lambda_rank=lam_rank,
         lambda_lu=lam_lu,
         lambda_ipm=hparams["lambda_ipm"],
+        checkpoint_metric=getattr(args, "checkpoint_metric", "val_loss"),
     )
 
     print("Training...")
@@ -270,12 +304,21 @@ def save_to_csv(model_name, dataset_name, all_metrics, filename):
     """Appends aggregated results to a CSV file."""
     row = {"Model": model_name}
     for k, v_list in all_metrics.items():
-        row[k] = np.mean(v_list)
+        if k != "val_loss":
+            row[f"{k}_mean"] = np.mean(v_list)
+            row[f"{k}_std"] = np.std(v_list)
 
     df_new = pd.DataFrame([row])
 
     # Define column order
-    cols = ["Model", "auuc", "qini", "lift_30", "krcc", "latency_ms"]
+    cols = [
+        "Model",
+        "auuc_mean", "auuc_std",
+        "qini_mean", "qini_std",
+        "lift_30_mean", "lift_30_std",
+        "krcc_mean", "krcc_std",
+        "latency_ms_mean", "latency_ms_std"
+    ]
     for c in cols:
         if c not in df_new.columns:
             df_new[c] = np.nan
@@ -294,14 +337,15 @@ def save_to_csv(model_name, dataset_name, all_metrics, filename):
 
 def _get_output_path(args):
     """Return the results CSV path (relative to root) for untuned runs."""
+    folder = "results/untuned_max_auqc" if getattr(args, "checkpoint_metric", "val_loss") == "val_qini" else "results/untuned"
     if args.dataset == "synthetic":
-        return "results/untuned/synthesis.csv"
+        return f"{folder}/synthesis.csv"
     elif args.dataset == "hillstrom-men":
-        return "results/untuned/hillstrom_men.csv"
+        return f"{folder}/hillstrom_men.csv"
     elif args.dataset == "hillstrom-women":
-        return "results/untuned/hillstrom_women.csv"
+        return f"{folder}/hillstrom_women.csv"
     else:
-        return f"results/untuned/{args.dataset}.csv"
+        return f"{folder}/{args.dataset}.csv"
 
 
 # =====================================================================
@@ -412,7 +456,7 @@ def main():
     parser.add_argument("--model", type=str, required=True,
                         choices=["TARNet", "DragonNet", "CFR-WASS", "CFR-MMD",
                                  "UniTE", "EUEN", "T-Learner", "S-Learner",
-                                 "CausalForest", "ZILN-GBDT"],
+                                 "CausalForest", "ZILN-GBDT", "EFIN"],
                         help="Base model architecture to use.")
     parser.add_argument("--dataset", type=str, default="synthetic",
                         choices=["synthetic", "hillstrom-men", "hillstrom-women"],
@@ -431,6 +475,10 @@ def main():
                         help="Enable Listwise Uplift Ranking Loss (RERUM).")
     parser.add_argument("--use_response_ranking", action="store_true",
                         help="Enable Pairwise Response Ranking Loss (RERUM).")
+    parser.add_argument("--checkpoint_metric", "--checkpoint_restore", type=str, default="val_loss",
+                        dest="checkpoint_metric",
+                        choices=["val_loss", "val_qini"],
+                        help="Metric to select best epoch checkpoint during training.")
 
     args = parser.parse_args()
 

@@ -1,13 +1,14 @@
 {
-  "lr": 0.0004192042786659749,
-  "l2_reg": 0.0033526795586247306,
+  "lr": 0.007629390722402092,
+  "l2_reg": 9.625078352024903e-06,
   "batch_size": 512,
-  "hidden_dim": 32,
+  "hidden_dim": 128,
   "focal_gamma": 2.0,
   "focal_alpha": 0.9,
   "lambda_rank": 0.0001,
-  "lambda_lu": 8.213487406505022e-05,
+  "lambda_lu": 0.0030564530504407503,
   "lambda_ipm": 1.0,
   "lambda_prop": 1.0,
-  "epochs": 30
+  "epochs": 30,
+  "lambda_c": 1.0
 }

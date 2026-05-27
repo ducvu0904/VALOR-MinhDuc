@@ -61,6 +61,7 @@ class BaselineTrainer:
         lambda_prop: float = 1.0,
         lambda_lu: float = 0.0,
         lambda_resrank: float = 0.0,
+        checkpoint_metric: str = "val_loss",
     ):
         self.model = model.to(device)
         self.device = device
@@ -69,6 +70,7 @@ class BaselineTrainer:
         self.lambda_prop = lambda_prop
         self.lambda_lu = lambda_lu
         self.lambda_resrank = lambda_resrank
+        self.checkpoint_metric = checkpoint_metric
         
         if self.lambda_lu > 0:
             self._listwise = ListwiseUpliftLoss()
@@ -209,6 +211,7 @@ class BaselineTrainer:
         history = {"train_loss": [], "val_loss": []}
 
         best_val_loss = float("inf")
+        best_val_qini = float("-inf")
         best_state = copy.deepcopy(model.state_dict())
 
         for epoch in range(self.epochs):
@@ -246,13 +249,26 @@ class BaselineTrainer:
             if val_loader is not None:
                 val_loss = self._eval_loss(val_loader)
                 history["val_loss"].append(val_loss)
-                print(
-                    f"Epoch {epoch+1}/{self.epochs} | "
-                    f"Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f}"
-                )
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    best_state = copy.deepcopy(model.state_dict())
+                if self.checkpoint_metric == "val_qini":
+                    val_qini = self._eval_qini(val_loader)
+                    if "val_qini" not in history:
+                        history["val_qini"] = []
+                    history["val_qini"].append(val_qini)
+                    print(
+                        f"Epoch {epoch+1}/{self.epochs} | "
+                        f"Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f} | Val Qini: {val_qini:.4f}"
+                    )
+                    if val_qini > best_val_qini:
+                        best_val_qini = val_qini
+                        best_state = copy.deepcopy(model.state_dict())
+                else:
+                    print(
+                        f"Epoch {epoch+1}/{self.epochs} | "
+                        f"Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f}"
+                    )
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        best_state = copy.deepcopy(model.state_dict())
             else:
                 print(
                     f"Epoch {epoch+1}/{self.epochs} | "
@@ -286,6 +302,30 @@ class BaselineTrainer:
             n += 1
         return total / max(n, 1)
 
+    @torch.no_grad()
+    def _eval_qini(self, loader):
+        self.model.eval()
+        all_preds = []
+        all_labels = []
+        all_treatments = []
+        for batch in loader:
+            x_cat, x_num, treatment, label, _ = [b.to(self.device) for b in batch]
+            uplift_pred = self.model.predict_uplift(x_cat, x_num)
+            all_preds.append(uplift_pred.cpu().numpy())
+            all_labels.append(label.cpu().numpy())
+            all_treatments.append(treatment.cpu().numpy())
+        
+        preds = np.concatenate(all_preds)
+        labels = np.concatenate(all_labels)
+        treatments = np.concatenate(all_treatments)
+        
+        from utils.metrics import auqc
+        try:
+            val_qini = auqc(labels, treatments, preds, plot=False, bins=100)
+        except Exception:
+            val_qini = -999.0
+        return val_qini
+
 
 # =====================================================================
 #  VALOR Trainer
@@ -317,11 +357,13 @@ class VALORTrainer:
         alpha: float = 0.25,
         lambda_rank: float = 1.0,
         use_ranking: bool = True,
+        checkpoint_metric: str = "val_loss",
     ):
         self.model = model.to(device)
         self.device = device
         self.epochs = epochs
         self.use_ranking = use_ranking
+        self.checkpoint_metric = checkpoint_metric
 
         self.optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=l2_reg)
 
@@ -344,6 +386,7 @@ class VALORTrainer:
         history = {"train_loss": [], "val_loss": []}
 
         best_val_loss = float("inf")
+        best_val_qini = float("-inf")
         best_state = copy.deepcopy(model.state_dict())
 
         for epoch in range(self.epochs):
@@ -440,13 +483,26 @@ class VALORTrainer:
             if val_loader is not None:
                 val_loss = self._eval_loss(val_loader)
                 history["val_loss"].append(val_loss)
-                print(
-                    f"Epoch {epoch+1}/{self.epochs} | "
-                    f"Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f}"
-                )
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    best_state = copy.deepcopy(model.state_dict())
+                if self.checkpoint_metric == "val_qini":
+                    val_qini = self._eval_qini(val_loader)
+                    if "val_qini" not in history:
+                        history["val_qini"] = []
+                    history["val_qini"].append(val_qini)
+                    print(
+                        f"Epoch {epoch+1}/{self.epochs} | "
+                        f"Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f} | Val Qini: {val_qini:.4f}"
+                    )
+                    if val_qini > best_val_qini:
+                        best_val_qini = val_qini
+                        best_state = copy.deepcopy(model.state_dict())
+                else:
+                    print(
+                        f"Epoch {epoch+1}/{self.epochs} | "
+                        f"Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f}"
+                    )
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        best_state = copy.deepcopy(model.state_dict())
             else:
                 print(
                     f"Epoch {epoch+1}/{self.epochs} | "
@@ -490,6 +546,30 @@ class VALORTrainer:
 
         return total / max(n, 1)
 
+    @torch.no_grad()
+    def _eval_qini(self, loader):
+        self.model.eval()
+        all_preds = []
+        all_labels = []
+        all_treatments = []
+        for batch in loader:
+            x_cat, x_num, treatment, label, _ = [b.to(self.device) for b in batch]
+            uplift_pred = self.model.predict_uplift(x_cat, x_num)
+            all_preds.append(uplift_pred.cpu().numpy())
+            all_labels.append(label.cpu().numpy())
+            all_treatments.append(treatment.cpu().numpy())
+        
+        preds = np.concatenate(all_preds)
+        labels = np.concatenate(all_labels)
+        treatments = np.concatenate(all_treatments)
+        
+        from utils.metrics import auqc
+        try:
+            val_qini = auqc(labels, treatments, preds, plot=False, bins=100)
+        except Exception:
+            val_qini = -999.0
+        return val_qini
+
 
 # =====================================================================
 #  RERUM Trainer
@@ -501,7 +581,8 @@ class RERUMTrainer:
     """
     def __init__(
         self, model, lr=5e-4, l2_reg=1e-5, epochs=30, device="cpu",
-        lambda_rank=1.0, lambda_lu=1.0, lambda_ipm=1.0
+        lambda_rank=1.0, lambda_lu=1.0, lambda_ipm=1.0,
+        checkpoint_metric: str = "val_loss",
     ):
         self.model = model.to(device)
         self.device = device
@@ -509,6 +590,7 @@ class RERUMTrainer:
         self.lambda_rank = lambda_rank
         self.lambda_lu = lambda_lu
         self.lambda_ipm = lambda_ipm
+        self.checkpoint_metric = checkpoint_metric
 
         self.optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=l2_reg)
         self._ziln = ZILNLoss()
@@ -519,6 +601,7 @@ class RERUMTrainer:
         model = self.model
         history = {"train_loss": [], "val_loss": []}
         best_val_loss = float("inf")
+        best_val_qini = float("-inf")
         best_state = copy.deepcopy(model.state_dict())
 
         for epoch in range(self.epochs):
@@ -564,9 +647,18 @@ class RERUMTrainer:
             if val_loader:
                 val_loss = self._eval_loss(val_loader)
                 history["val_loss"].append(val_loss)
-                print(f"Epoch {epoch+1}/{self.epochs} | Train Loss: {avg_train:.4f} | Val Loss: {val_loss:.4f}")
-                if val_loss < best_val_loss:
-                    best_val_loss, best_state = val_loss, copy.deepcopy(model.state_dict())
+                if self.checkpoint_metric == "val_qini":
+                    val_qini = self._eval_qini(val_loader)
+                    if "val_qini" not in history:
+                        history["val_qini"] = []
+                    history["val_qini"].append(val_qini)
+                    print(f"Epoch {epoch+1}/{self.epochs} | Train Loss: {avg_train:.4f} | Val Loss: {val_loss:.4f} | Val Qini: {val_qini:.4f}")
+                    if val_qini > best_val_qini:
+                        best_val_qini, best_state = val_qini, copy.deepcopy(model.state_dict())
+                else:
+                    print(f"Epoch {epoch+1}/{self.epochs} | Train Loss: {avg_train:.4f} | Val Loss: {val_loss:.4f}")
+                    if val_loss < best_val_loss:
+                        best_val_loss, best_state = val_loss, copy.deepcopy(model.state_dict())
             else:
                 print(f"Epoch {epoch+1}/{self.epochs} | Train Loss: {avg_train:.4f}")
 
@@ -601,3 +693,239 @@ class RERUMTrainer:
             total += total_loss.item()
             n += 1
         return total / max(n, 1)
+
+    @torch.no_grad()
+    def _eval_qini(self, loader):
+        self.model.eval()
+        all_preds = []
+        all_labels = []
+        all_treatments = []
+        for batch in loader:
+            x_cat, x_num, treatment, label, _ = [b.to(self.device) for b in batch]
+            uplift_pred = self.model.predict_uplift(x_cat, x_num)
+            all_preds.append(uplift_pred.cpu().numpy())
+            all_labels.append(label.cpu().numpy())
+            all_treatments.append(treatment.cpu().numpy())
+        
+        preds = np.concatenate(all_preds)
+        labels = np.concatenate(all_labels)
+        treatments = np.concatenate(all_treatments)
+        
+        from utils.metrics import auqc
+        try:
+            val_qini = auqc(labels, treatments, preds, plot=False, bins=100)
+        except Exception:
+            val_qini = -999.0
+        return val_qini
+
+
+# =====================================================================
+#  EFIN Trainer
+# =====================================================================
+
+class EFINTrainer:
+    """
+    Trainer for the EFIN model.
+
+    Parameters
+    ----------
+    model    : EFIN instance
+    lr       : float   — learning rate
+    l2_reg   : float   — L2 weight decay (passed to Adam optimizer)
+    epochs   : int
+    device   : str
+    lambda_c : float   — weight for intervention constraint loss L_C
+    use_focal: bool    — use Focal-ZILN instead of standard ZILN
+    focal_gamma: float
+    focal_alpha: float
+    """
+
+    def __init__(
+        self,
+        model,
+        lr: float = 5e-4,
+        l2_reg: float = 1e-5,
+        epochs: int = 30,
+        device: str = "cpu",
+        lambda_c: float = 1.0,
+        use_focal: bool = False,
+        focal_gamma: float = 2.0,
+        focal_alpha: float = 0.25,
+        checkpoint_metric: str = "val_loss",
+    ):
+        self.model = model.to(device)
+        self.device = device
+        self.epochs = epochs
+        self.lambda_c = lambda_c
+        self.checkpoint_metric = checkpoint_metric
+
+        self.optimizer = torch.optim.Adam(
+            model.parameters(), lr=lr, weight_decay=l2_reg
+        )
+
+        self.use_ziln = getattr(model, "use_ziln", False)
+        if self.use_ziln:
+            if use_focal:
+                self._ziln = FocalZILNLoss(gamma=focal_gamma, alpha=focal_alpha)
+            else:
+                self._ziln = ZILNLoss()
+        self._mse = nn.MSELoss()
+
+    # ── Loss helpers ──────────────────────────────────────────────────────────
+
+    def _loss_s(self, y0_out, label, mask_c):
+        """L_S: control-group factual loss."""
+        if mask_c.sum() == 0:
+            return torch.tensor(0.0, device=self.device)
+
+        if self.use_ziln:
+            pi0, mu0, sig0 = y0_out
+            return self._ziln(pi0[mask_c], mu0[mask_c], sig0[mask_c], label[mask_c])
+        else:
+            return self._mse(y0_out[mask_c], label[mask_c])
+
+    def _loss_t(self, y0_out, tau_out, label, mask_t):
+        """L_T: treated-group factual loss  ŷ(k) = ŷ(0) + τ̂(x)."""
+        if mask_t.sum() == 0:
+            return torch.tensor(0.0, device=self.device)
+
+        if self.use_ziln:
+            pi0, mu0, sig0 = y0_out
+            pi_tau, mu_tau, sig_tau = tau_out
+            # Combine via expected values and use MSE on treated samples
+            ev0 = ziln_expected_value(torch.sigmoid(pi0), mu0, sig0)
+            ev_tau = ziln_expected_value(torch.sigmoid(pi_tau), mu_tau, sig_tau)
+            pred_t = ev0[mask_t] + ev_tau[mask_t]
+            return self._mse(pred_t, label[mask_t])
+        else:
+            pred_t = (y0_out + tau_out)[mask_t]
+            return self._mse(pred_t, label[mask_t])
+
+    def _loss_c(self, t_hat_logit, treatment):
+        """L_C: intervention constraint with INVERTED treatment labels."""
+        inverted = 1.0 - treatment.float()
+        return F.binary_cross_entropy_with_logits(t_hat_logit, inverted)
+
+    # ── Training loop ─────────────────────────────────────────────────────────
+
+    def train(self, train_loader, val_loader=None):
+        """Full training loop. Restores best-val-loss checkpoint at the end."""
+        model = self.model
+        history = {"train_loss": [], "val_loss": []}
+
+        best_val_loss = float("inf")
+        best_val_qini = float("-inf")
+        best_state = copy.deepcopy(model.state_dict())
+
+        for epoch in range(self.epochs):
+            model.train()
+            epoch_loss = 0.0
+            n_batches = 0
+
+            for batch in train_loader:
+                x_cat, x_num, treatment, label, _ = [
+                    b.to(self.device) for b in batch
+                ]
+
+                self.optimizer.zero_grad()
+
+                y0_out, tau_out, t_hat_logit, _ = model(x_cat, x_num, treatment)
+
+                mask_t = treatment == 1
+                mask_c = treatment == 0
+
+                ls = self._loss_s(y0_out, label, mask_c)
+                lt = self._loss_t(y0_out, tau_out, label, mask_t)
+                lc = self._loss_c(t_hat_logit, treatment)
+
+                loss = ls + lt + self.lambda_c * lc
+                loss.backward()
+                self.optimizer.step()
+
+                epoch_loss += loss.item()
+                n_batches += 1
+
+            avg_train_loss = epoch_loss / max(n_batches, 1)
+            history["train_loss"].append(avg_train_loss)
+
+            # Validation + checkpointing
+            if val_loader is not None:
+                val_loss = self._eval_loss(val_loader)
+                history["val_loss"].append(val_loss)
+                if self.checkpoint_metric == "val_qini":
+                    val_qini = self._eval_qini(val_loader)
+                    if "val_qini" not in history:
+                        history["val_qini"] = []
+                    history["val_qini"].append(val_qini)
+                    print(
+                        f"Epoch {epoch+1}/{self.epochs} | "
+                        f"Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f} | Val Qini: {val_qini:.4f}"
+                    )
+                    if val_qini > best_val_qini:
+                        best_val_qini = val_qini
+                        best_state = copy.deepcopy(model.state_dict())
+                else:
+                    print(
+                        f"Epoch {epoch+1}/{self.epochs} | "
+                        f"Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f}"
+                    )
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        best_state = copy.deepcopy(model.state_dict())
+            else:
+                print(
+                    f"Epoch {epoch+1}/{self.epochs} | "
+                    f"Train Loss: {avg_train_loss:.4f}"
+                )
+
+        # Restore best checkpoint
+        model.load_state_dict(best_state)
+        return history
+
+    @torch.no_grad()
+    def _eval_loss(self, loader):
+        """Validation loss: L_S + L_T only (no intervention constraint)."""
+        self.model.eval()
+        total = 0.0
+        n = 0
+
+        for batch in loader:
+            x_cat, x_num, treatment, label, _ = [b.to(self.device) for b in batch]
+
+            y0_out, tau_out, _, _ = self.model(x_cat, x_num, treatment)
+
+            mask_t = treatment == 1
+            mask_c = treatment == 0
+
+            ls = self._loss_s(y0_out, label, mask_c)
+            lt = self._loss_t(y0_out, tau_out, label, mask_t)
+
+            total += (ls + lt).item()
+            n += 1
+
+        return total / max(n, 1)
+
+    @torch.no_grad()
+    def _eval_qini(self, loader):
+        self.model.eval()
+        all_preds = []
+        all_labels = []
+        all_treatments = []
+        for batch in loader:
+            x_cat, x_num, treatment, label, _ = [b.to(self.device) for b in batch]
+            uplift_pred = self.model.predict_uplift(x_cat, x_num)
+            all_preds.append(uplift_pred.cpu().numpy())
+            all_labels.append(label.cpu().numpy())
+            all_treatments.append(treatment.cpu().numpy())
+
+        import numpy as np
+        preds = np.concatenate(all_preds)
+        labels = np.concatenate(all_labels)
+        treatments = np.concatenate(all_treatments)
+
+        from utils.metrics import auqc
+        try:
+            val_qini = auqc(labels, treatments, preds, plot=False, bins=100)
+        except Exception:
+            val_qini = -999.0
+        return val_qini

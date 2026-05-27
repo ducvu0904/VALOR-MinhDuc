@@ -35,6 +35,11 @@ def main():
         "--n_trials", type=int, default=50,
         help="Number of Optuna trials per model (default: 50)"
     )
+    parser.add_argument(
+        "--checkpoint_metric", type=str, default="val_loss",
+        choices=["val_loss", "val_qini"],
+        help="Metric to select best epoch checkpoint during training."
+    )
     args = parser.parse_args()
 
     if args.dataset == "all":
@@ -48,6 +53,7 @@ def main():
     print(f"Targeting Datasets: {datasets}")
     print(f"Targeting Backbones: {backbones}")
     print(f"Trials per tuning run: {args.n_trials}")
+    print(f"Checkpoint metric: {args.checkpoint_metric}")
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     tune_py_path = os.path.join(script_dir, "tune.py")
@@ -57,7 +63,8 @@ def main():
             print(f"\n{'='*60}\n  Tuning Backbone: {b} on Dataset: {d}\n{'='*60}")
 
             base_cmd = ["python", tune_py_path, "--model", b, "--dataset", d,
-                        "--n_trials", str(args.n_trials)]
+                        "--n_trials", str(args.n_trials),
+                        "--checkpoint_metric", args.checkpoint_metric]
 
             # ── VALOR / Baseline ablations ─────────────────────────────────
             # 1. Backbone (MSE)
@@ -76,17 +83,28 @@ def main():
             # ── Ranking-only ablations (non-RERUM) ────────────────────────
             # 7. Backbone (MSE) + uplift ranking
             run_cmd(base_cmd + ["--use_uplift_ranking"])
-            # 8. Backbone + ZILN + uplift ranking
+            # 8. Backbone (MSE) + uplift ranking + response ranking
+            run_cmd(base_cmd + ["--use_uplift_ranking", "--use_response_ranking"])
+            # 9. Backbone + ZILN + uplift ranking
             run_cmd(base_cmd + ["--use_ziln", "--use_uplift_ranking"])
-            # 9. Backbone (MSE) + response ranking
-            run_cmd(base_cmd + ["--use_response_ranking"])
-            # 10. Backbone + ZILN + response ranking
-            run_cmd(base_cmd + ["--use_ziln", "--use_response_ranking"])
 
             # ── RERUM: requires ZILN + both ranking losses ─────────────────
-            # 11. Full RERUM
+            # 10. Full RERUM
             run_cmd(base_cmd + ["--rerum", "--use_ziln",
                                  "--use_uplift_ranking", "--use_response_ranking"])
+
+    # ── EFIN experiments (self-contained, no backbone flags) ──────────────────
+    for d in datasets:
+        print(f"\n{'='*60}\n  Tuning EFIN on Dataset: {d}\n{'='*60}")
+        efin_base = ["python", tune_py_path, "--model", "EFIN", "--dataset", d,
+                     "--n_trials", str(args.n_trials),
+                     "--checkpoint_metric", args.checkpoint_metric]
+        # 1. EFIN (MSE)
+        run_cmd(efin_base)
+        # 2. EFIN + ZILN
+        run_cmd(efin_base + ["--use_ziln"])
+        # 3. EFIN + Focal-ZILN
+        run_cmd(efin_base + ["--use_ziln", "--use_focal"])
 
 
 if __name__ == "__main__":

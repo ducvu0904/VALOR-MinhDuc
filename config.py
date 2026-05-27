@@ -7,9 +7,9 @@ class Config:
     N_PID = 500000
 
     # Training Hyperparameters
-    SEEDS = [42, 123, 456, 789, 1024]
+    SEEDS = list(range(10))
     EPOCHS = 30
-    LR = 5e-4
+    LR = 1e-3
     BATCH_SIZE = 512
     HIDDEN_DIM = 256
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -56,4 +56,7 @@ def default_hparams() -> dict:
 
         # Training schedule
         "epochs":      Config.EPOCHS,
+
+        # EFIN intervention constraint weight
+        "lambda_c":    1.0,
     }

@@ -77,7 +77,7 @@ def build_trial_hparams(trial, args) -> dict:
     # ── Universal params ──────────────────────────────────────────────────────
     hparams["lr"]         = trial.suggest_float("lr",      1e-5, 1e-2, log=True)
     hparams["l2_reg"]     = trial.suggest_float("l2_reg",  1e-6, 1e-2, log=True)
-    hparams["hidden_dim"] = trial.suggest_categorical("hidden_dim", [32, 64, 128])
+    hparams["hidden_dim"] = trial.suggest_categorical("hidden_dim", [32, 64, 128, 256, 512])
 
     # ── VALOR focal params (only when focal loss is in use) ───────────────────
     is_valor_focal = args.use_focal or args.use_gating or args.use_ranking
@@ -92,6 +92,10 @@ def build_trial_hparams(trial, args) -> dict:
     # ── Listwise uplift ranking weight ────────────────────────────────────────
     if getattr(args, "use_uplift_ranking", False):
         hparams["lambda_lu"] = trial.suggest_float("lambda_lu", 1e-6, 1e-1, log=True)
+
+    # ── EFIN intervention constraint weight ───────────────────────────────────
+    if args.model == "EFIN":
+        hparams["lambda_c"] = trial.suggest_float("lambda_c", 0.01, 10.0, log=True)
 
     return hparams
 
@@ -258,7 +262,7 @@ def main():
     parser.add_argument("--model", type=str, required=True,
                         choices=["TARNet", "DragonNet", "CFR-WASS", "CFR-MMD",
                                  "UniTE", "EUEN", "T-Learner", "S-Learner",
-                                 "CausalForest", "ZILN-GBDT"])
+                                 "CausalForest", "ZILN-GBDT", "EFIN"])
     parser.add_argument("--dataset", type=str, default="hillstrom-men",
                         choices=["synthetic", "hillstrom-men", "hillstrom-women"])
     parser.add_argument("--rerum",                action="store_true")
@@ -268,6 +272,10 @@ def main():
     parser.add_argument("--use_ranking",          action="store_true")
     parser.add_argument("--use_uplift_ranking",   action="store_true")
     parser.add_argument("--use_response_ranking", action="store_true")
+    parser.add_argument("--checkpoint_metric", "--checkpoint_restore", type=str, default="val_loss",
+                        dest="checkpoint_metric",
+                        choices=["val_loss", "val_qini"],
+                        help="Metric to select best epoch checkpoint during training.")
 
     # Tuning-specific flags
     parser.add_argument("--n_trials",   type=int, default=50,
